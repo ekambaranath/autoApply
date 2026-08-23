@@ -1,0 +1,1 @@
+{"manifest_version":3,"name":"Open Career Agent","version":"0.1.0","description":"Send the current job page to your local Open Career Agent.","permissions":["activeTab","scripting"],"action":{"default_title":"Send job to Career Agent"},"background":{"service_worker":"background.js"}}
