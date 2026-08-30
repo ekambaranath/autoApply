@@ -9,8 +9,9 @@ import re
 import httpx
 from bs4 import BeautifulSoup
 
+from . import aggregators as A
 from . import providers as P
-from .core import db, now, get_prefs
+from .core import db, now, get_prefs, get_setting
 from .discovery import save_job
 from .title_filter import build_title_filter
 
@@ -96,6 +97,88 @@ def _scan_entry(w, keep_title):
         except Exception:
             pass
     return saved, filtered
+
+
+def active_sources():
+    """Enabled aggregator ids, seeded with a sensible default on first run."""
+    c = db()
+    rows = {r['id']: r['active'] for r in c.execute('SELECT id,active FROM sources')}
+    if not rows:
+        for sid in A.DEFAULT_ENABLED:
+            c.execute('INSERT OR IGNORE INTO sources(id,active) VALUES(?,1)', (sid,))
+        c.commit()
+        rows = {sid: 1 for sid in A.DEFAULT_ENABLED}
+    c.close()
+    return [sid for sid, active in rows.items() if active and sid in A.AGGREGATORS]
+
+
+def scan_sources(trigger='manual', max_age_days=None):
+    """Pull fresh postings from every enabled aggregator.
+
+    Unlike the watchlist path this needs no company list: the sources are
+    market-wide, so new postings arrive on their own. Results still go through
+    the same title filter and the same URL-dedup as everything else.
+    """
+    import uuid as _uuid
+    prefs = get_prefs() or {}
+    query = prefs.get('keywords') or prefs.get('roles') or ''
+    location = prefs.get('locations') or ''
+    if max_age_days is None:
+        max_age_days = int(get_setting('fresh_days', '30') or 30)
+    keep_title = _title_filter()
+
+    run_id = _uuid.uuid4().hex
+    started = now()
+    sources = active_sources()
+    c = db()
+    c.execute('INSERT INTO scan_runs(id,trigger,status,jobs_found,companies,detail,error,'
+              'started_at,finished_at) VALUES(?,?,?,?,?,?,?,?,?)',
+              (run_id, f'sources:{trigger}', 'RUNNING', 0, len(sources), '[]', None, started, None))
+    c.commit(); c.close()
+
+    out, total = [], 0
+    for sid in sources:
+        saved = filtered = stale = 0
+        error = None
+        try:
+            for j in A.fetch(sid, query=query, location=location):
+                if not A.is_fresh(j, max_age_days):
+                    stale += 1
+                    continue
+                if not keep_title(j['title']):
+                    filtered += 1
+                    continue
+                save_job(j['title'], j['company'], j['location'], j['url'], j['description'],
+                         f'aggregator:{sid}', ats_from_url(j['url']), j.get('posted_at'))
+                saved += 1
+        except Exception as e:
+            error = str(e)
+        total += saved
+        entry = {'source': sid, 'count': saved}
+        if filtered:
+            entry['filtered_by_title'] = filtered
+        if stale:
+            entry['too_old'] = stale
+        if error:
+            entry['error'] = error
+        out.append(entry)
+        c = db()
+        c.execute('INSERT INTO sources(id,active,last_run,last_count,last_error) VALUES(?,1,?,?,?) '
+                  'ON CONFLICT(id) DO UPDATE SET last_run=excluded.last_run,'
+                  'last_count=excluded.last_count,last_error=excluded.last_error',
+                  (sid, now(), saved, error))
+        c.commit(); c.close()
+
+    c = db()
+    c.execute('UPDATE scan_runs SET status=?,jobs_found=?,detail=?,finished_at=? WHERE id=?',
+              ('COMPLETED', total, json.dumps(out), now(), run_id))
+    c.commit(); c.close()
+    return out
+
+
+def scan_all(trigger='manual'):
+    """Both discovery paths: market-wide sources first, then the watchlist."""
+    return {'sources': scan_sources(trigger), 'watchlist': scan_watchlist(trigger)}
 
 
 def scan_watchlist(trigger='manual'):

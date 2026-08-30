@@ -21,6 +21,8 @@ def init_db():
     CREATE TABLE IF NOT EXISTS watchlist(id INTEGER PRIMARY KEY,company TEXT,platform TEXT,slug TEXT,url TEXT,active INTEGER DEFAULT 1,created_at TEXT);
     CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT);
     CREATE TABLE IF NOT EXISTS scan_runs(id TEXT PRIMARY KEY,trigger TEXT,status TEXT,jobs_found INTEGER DEFAULT 0,companies INTEGER DEFAULT 0,detail TEXT,error TEXT,started_at TEXT,finished_at TEXT);
+    CREATE TABLE IF NOT EXISTS sources(id TEXT PRIMARY KEY,active INTEGER DEFAULT 1,last_run TEXT,last_count INTEGER DEFAULT 0,last_error TEXT);
+    CREATE TABLE IF NOT EXISTS mail_state(key TEXT PRIMARY KEY,value TEXT);
     CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
     CREATE INDEX IF NOT EXISTS idx_jobs_score ON jobs(match_score);
     '''); c.commit(); c.close()

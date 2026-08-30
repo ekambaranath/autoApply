@@ -69,6 +69,24 @@ export const api = {
   logFollowup: (id) => post(`/api/applications/${id}/followup`),
   states: () => request('/api/states'),
 
+  // Market-wide sources — job discovery that needs no watchlist.
+  sources: () => request('/api/sources'),
+  toggleSource: (id) => post(`/api/sources/${id}/toggle`),
+  testSource: (id) => post(`/api/sources/${id}/test`),
+  freshness: () => request('/api/settings/freshness'),
+  setFreshness: (days) =>
+    request('/api/settings/freshness', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ fresh_days: String(days) }),
+    }),
+  scanSources: () => post('/api/agent/scan?sources_only=true'),
+  scanWatchlist: () => post('/api/agent/scan?watchlist_only=true'),
+
+  // Inbox — closes the tracking loop by reading employer replies.
+  mailbox: () => request('/api/mailbox'),
+  mailSync: (dryRun = false) => post(`/api/mailbox/sync?dry_run=${dryRun}`),
+
   providers: () => request('/api/providers'),
   detectProvider: (url) =>
     request('/api/providers/detect', {
