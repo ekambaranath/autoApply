@@ -1,30 +1,29 @@
-import httpx, re, json
+import sqlite3, httpx, re, json
 from bs4 import BeautifulSoup
 from .core import db, get_profile, get_prefs, score_job, now, uuid
 
 def save_job(title,company,location,url,description,source='manual',ats='unknown',posted_at=None):
+    """Insert a job, or return the existing id when the URL was already seen."""
     p=get_profile() or {}; prefs=get_prefs(); score,reasons=score_job(description,p.get('resume_text',''),prefs)
     jid=uuid.uuid4().hex; c=db()
     try:
-        c.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',(jid,title[:300],company[:200],location[:300],url,source,ats,description[:100000],posted_at,score,json.dumps(reasons),'NEW',now())); c.commit()
-    except Exception:
-        row=c.execute('SELECT id FROM jobs WHERE url=?',(url,)).fetchone(); jid=row['id'] if row else jid
-    c.close(); return jid
+        # Columns are listed explicitly so later schema migrations cannot break this insert.
+        c.execute('INSERT INTO jobs(id,title,company,location,url,source,ats,description,posted_at,match_score,'
+                  'match_reasons,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                  (jid,(title or '')[:300],(company or '')[:200],(location or '')[:300],url,source,ats,
+                   (description or '')[:100000],posted_at,score,json.dumps(reasons),'NEW',now()))
+        c.commit()
+    except sqlite3.IntegrityError:
+        row=c.execute('SELECT id FROM jobs WHERE url=?',(url,)).fetchone()
+        if row: jid=row['id']
+    finally:
+        c.close()
+    return jid
 
-def greenhouse(company,slug):
-    url=f'https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true'
-    r=httpx.get(url,timeout=30); r.raise_for_status(); data=r.json(); n=0
-    for j in data.get('jobs',[]):
-        save_job(j.get('title',''),company,j.get('location',{}).get('name',''),j.get('absolute_url',''),BeautifulSoup(j.get('content',''),'html.parser').get_text('\n',strip=True),'greenhouse','greenhouse',j.get('updated_at')); n+=1
-    return n
-
-def lever(company,slug):
-    url=f'https://api.lever.co/v0/postings/{slug}?mode=json'
-    r=httpx.get(url,timeout=30); r.raise_for_status(); n=0
-    for j in r.json():
-        desc=(j.get('descriptionPlain') or '')+'\n'+ '\n'.join(x.get('content','') for x in j.get('lists',[]))
-        save_job(j.get('text',''),company,(j.get('categories') or {}).get('location',''),j.get('hostedUrl',''),desc,'lever','lever',j.get('createdAt')); n+=1
-    return n
+# Greenhouse and Lever fetching now lives in providers.py alongside the other
+# nine boards. Keeping a second copy here is the drift that costs correctness:
+# the two would diverge and a company would be scanned differently depending on
+# which path reached it.
 
 def import_url(url):
     r=httpx.get(url,timeout=30,follow_redirects=True,headers={'User-Agent':'Mozilla/5.0'}); r.raise_for_status(); s=BeautifulSoup(r.text,'html.parser'); text=s.get_text('\n',strip=True)
