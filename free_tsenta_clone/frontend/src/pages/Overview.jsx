@@ -28,8 +28,13 @@ export default function Overview({ onNavigate }) {
           </p>
         </div>
         <div className="btn-row">
-          <Action className="btn" onClick={() => api.scan()} onDone={() => { analytics.reload(); stats.reload() }}>
-            Scan now
+          <Action className="btn primary" onClick={() => api.scanSources()}
+                  onDone={() => { analytics.reload(); stats.reload() }}>
+            Pull fresh jobs
+          </Action>
+          <Action className="btn" onClick={() => api.scan()}
+                  onDone={() => { analytics.reload(); stats.reload() }}>
+            Full scan
           </Action>
           <a className="btn" href="/api/export.csv">Export CSV</a>
         </div>

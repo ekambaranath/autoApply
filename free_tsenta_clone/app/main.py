@@ -8,9 +8,10 @@ from pypdf import PdfReader
 from docx import Document
 from .services.core import *
 from .services.discovery import save_job, import_url
-from .services.discovery_plus import scan_watchlist, ats_from_url
+from .services.discovery_plus import scan_watchlist, scan_sources, scan_all, ats_from_url, active_sources
+from .services import aggregators
 from .services.ats_agent import run_application
-from .services import scheduler, providers, insights, states
+from .services import scheduler, providers, insights, states, mailbox
 from .services.title_filter import build_title_filter
 
 app = FastAPI(title='Open Career Agent', version='4.0.0')
@@ -250,12 +251,16 @@ def watch_add(x: WatchIn):
         detected, detected_slug = providers.detect(x.url)
         platform = detected or 'career_page'
         slug = slug or detected_slug
-    if platform in providers.PROVIDERS and not slug:
+    # URL-addressed boards (Workday, Oracle, Eightfold) carry tenant/instance/site
+    # in the URL itself, so they legitimately have no slug.
+    if platform in providers.PROVIDERS and not slug and platform not in providers.URL_BASED:
         _p, detected_slug = providers.detect(x.url)
         slug = detected_slug
         if not slug:
             raise HTTPException(
                 400, f'{platform} entries need a board slug — {providers.SLUG_HELP.get(platform, "")}')
+    if platform in providers.URL_BASED and not x.url:
+        raise HTTPException(400, f'{platform} entries need the full careers URL')
     if platform not in providers.PROVIDERS and not x.url:
         raise HTTPException(400, 'Career-page entries need a URL')
     c = db()
@@ -302,7 +307,75 @@ def sync(): return scan_watchlist(trigger='manual')
 
 
 @app.post('/api/agent/scan')
-def agent_scan(): return {'results': scan_watchlist(trigger='manual')}
+def agent_scan(sources_only: bool = False, watchlist_only: bool = False):
+    """Run discovery now. By default both paths run: market-wide, then watchlist."""
+    if sources_only:
+        return {'sources': scan_sources(trigger='manual')}
+    if watchlist_only:
+        return {'watchlist': scan_watchlist(trigger='manual')}
+    return scan_all(trigger='manual')
+
+
+@app.get('/api/sources')
+def sources_list():
+    """Every market-wide source, with whether it is on and how it last did."""
+    enabled = set(active_sources())
+    c = db()
+    rows = {r['id']: dict(r) for r in c.execute('SELECT * FROM sources')}
+    c.close()
+    return [{'id': sid, 'label': label, 'coverage': coverage,
+             'active': sid in enabled,
+             'last_run': rows.get(sid, {}).get('last_run'),
+             'last_count': rows.get(sid, {}).get('last_count') or 0,
+             'last_error': rows.get(sid, {}).get('last_error')}
+            for sid, (_fn, label, coverage) in sorted(
+                aggregators.AGGREGATORS.items(), key=lambda kv: kv[1][1].lower())]
+
+
+@app.post('/api/sources/{sid}/toggle')
+def source_toggle(sid: str):
+    if sid not in aggregators.AGGREGATORS:
+        raise HTTPException(404, f'Unknown source: {sid}')
+    active_sources()  # seed defaults before flipping one
+    c = db()
+    row = c.execute('SELECT active FROM sources WHERE id=?', (sid,)).fetchone()
+    new = 0 if (row and row['active']) else 1
+    c.execute('INSERT INTO sources(id,active) VALUES(?,?) '
+              'ON CONFLICT(id) DO UPDATE SET active=excluded.active', (sid, new))
+    c.commit(); c.close()
+    return {'ok': True, 'active': bool(new)}
+
+
+@app.post('/api/sources/{sid}/test')
+def source_test(sid: str, limit: int = 5):
+    """Fetch a few rows from one source without saving, to check it still works."""
+    if sid not in aggregators.AGGREGATORS:
+        raise HTTPException(404, f'Unknown source: {sid}')
+    prefs = get_prefs() or {}
+    try:
+        jobs = aggregators.fetch(sid, query=prefs.get('keywords', ''),
+                                 location=prefs.get('locations', ''), limit=limit)
+    except Exception as e:
+        raise HTTPException(502, str(e))
+    return {'count': len(jobs), 'sample': jobs[:limit]}
+
+
+@app.get('/api/settings/freshness')
+def freshness_get():
+    return {'fresh_days': int(get_setting('fresh_days', '30') or 30)}
+
+
+@app.post('/api/settings/freshness')
+def freshness_set(fresh_days: int = Form(...)):
+    """0 keeps everything; otherwise postings older than this are skipped.
+
+    A feed that publishes no date is always kept — dropping undated rows would
+    silently discard whole sources.
+    """
+    if fresh_days < 0 or fresh_days > 365:
+        raise HTTPException(400, 'fresh_days must be between 0 and 365')
+    set_setting('fresh_days', fresh_days)
+    return {'ok': True, 'fresh_days': fresh_days}
 
 
 @app.get('/api/scans')
@@ -731,6 +804,33 @@ def job_legitimacy(jid: str):
         except Exception:
             age = None
     return insights.legitimacy_signals(j, repost_count=reposts, age_days=age)
+
+
+@app.get('/api/mailbox')
+def mailbox_status():
+    """Whether the inbox is wired up, and when it was last read."""
+    return {**mailbox.config(), 'last_sync': mailbox.last_sync()}
+
+
+@app.post('/api/mailbox/sync')
+def mailbox_sync(days: int = 30, limit: int = 100, dry_run: bool = False):
+    """Read recent mail and advance matching applications.
+
+    `dry_run` classifies and matches without changing anything, so you can see
+    what it would do before letting it touch your pipeline.
+    """
+    try:
+        return mailbox.sync(limit=limit, days=days, dry_run=dry_run)
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f'Mailbox sync failed: {e}')
+
+
+@app.post('/api/mailbox/classify')
+def mailbox_classify(subject: str = Form(''), body: str = Form('')):
+    """Try the classifier on one message, for tuning without a live mailbox."""
+    return {'classified': mailbox.classify(subject, body) or 'UNCLEAR'}
 
 
 @app.get('/api/states')

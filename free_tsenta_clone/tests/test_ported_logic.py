@@ -333,6 +333,114 @@ def test_smartrecruiters_paginates_and_fetches_details():
     assert '_id' not in jobs[0]
 
 
+def _with_post_stub(payloads, fn, *args, **kwargs):
+    """Stub the POST helper for providers that paginate with a request body."""
+    queue = list(payloads)
+    original = P._post
+    P._post = lambda url, payload, timeout=None, headers=None: _FakeResponse(
+        queue.pop(0) if len(queue) > 1 else queue[0])
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        P._post = original
+
+
+def test_workday_derives_tenant_and_site_from_the_url():
+    page = {'jobPostings': [{'title': 'Staff Engineer', 'externalPath': '/job/Berlin/Staff_R-1',
+                             'locationsText': 'Berlin', 'postedOn': 'Posted Today'}]}
+    jobs = _with_post_stub([page], P.workday, 'Acme',
+                           url='https://acme.wd5.myworkdayjobs.com/en-US/AcmeCareers')
+    assert jobs[0]['url'] == 'https://acme.wd5.myworkdayjobs.com/AcmeCareers/job/Berlin/Staff_R-1'
+    assert jobs[0]['location'] == 'Berlin'
+
+
+def test_workday_rejects_a_non_workday_url():
+    try:
+        P.workday('Acme', url='https://example.com/careers')
+    except P.ProviderError:
+        return
+    raise AssertionError('expected a ProviderError')
+
+
+def test_bamboohr_parser():
+    payload = {'result': [{'id': 12, 'jobOpeningName': 'Recruiter',
+                           'location': {'city': 'Austin', 'state': 'TX'}, 'isRemote': True}]}
+    jobs = _with_stub([payload], P.bamboohr, 'Acme', slug='acme')
+    assert jobs[0]['url'] == 'https://acme.bamboohr.com/careers/12'
+    assert jobs[0]['location'] == 'Austin, TX, Remote'
+
+
+def test_oraclecloud_flattens_requisition_list():
+    payload = {'items': [{'requisitionList': [
+        {'Title': 'Consultant', 'Id': 'REQ1', 'PrimaryLocation': 'Madrid',
+         'PostedDate': '2026-05-01'}]}]}
+    jobs = _with_stub([payload], P.oraclecloud, 'Acme',
+                      url='https://acme.fa.em2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1')
+    assert jobs[0]['title'] == 'Consultant' and 'CX_1' in jobs[0]['url']
+
+
+def test_eightfold_parser():
+    payload = {'positions': [{'name': 'ML Engineer', 'canonicalPositionUrl': 'https://ef/1',
+                              'location': 'Remote', 'job_description': '<p>Train</p>',
+                              't_create': 1700000000}]}
+    jobs = _with_stub([payload], P.eightfold, 'Acme', url='https://acme.eightfold.ai/careers')
+    assert jobs[0]['description'] == 'Train'
+
+
+def test_comeet_requires_uid_and_token():
+    try:
+        P.comeet('Acme', slug='justuid')
+    except P.ProviderError:
+        pass
+    else:
+        raise AssertionError('expected a ProviderError')
+    payload = [{'name': 'Ops Lead', 'url_active_page': 'https://c/1',
+                'location': {'city': 'Tel Aviv', 'country': 'IL'}}]
+    jobs = _with_stub([payload], P.comeet, 'Acme', slug='uid123/tok456')
+    assert jobs[0]['location'] == 'Tel Aviv, IL'
+
+
+def test_getro_reads_nested_results():
+    payload = {'results': {'jobs': [{'title': 'Founding Engineer', 'url': 'https://g/1',
+                                     'organization': {'name': 'Startup'},
+                                     'locations': ['Remote', 'EU']}]}}
+    jobs = _with_post_stub([payload], P.getro, 'Network', slug='42')
+    assert jobs[0]['company'] == 'Startup' and jobs[0]['location'] == 'Remote, EU'
+
+
+def test_softgarden_parser():
+    payload = {'jobs': [{'jobTitle': 'Controller', 'jobDetailUrl': 'https://sg/1',
+                         'location': {'city': 'Hamburg'}, 'jobDescription': '<p>Count</p>'}]}
+    jobs = _with_stub([payload], P.softgarden, 'Acme', slug='acme')
+    assert jobs[0]['location'] == 'Hamburg' and jobs[0]['description'] == 'Count'
+
+
+def test_jobvite_parser():
+    payload = {'jobs': [{'title': 'Account Exec', 'eId': 'oX1', 'location': 'Chicago'}]}
+    jobs = _with_stub([payload], P.jobvite, 'Acme', slug='acme')
+    assert jobs[0]['url'].endswith('/acme/job/oX1')
+
+
+def test_join_parser_marks_remote():
+    payload = {'jobs': [{'title': 'Growth Lead', 'idParam': 'g1',
+                         'location': {'city': 'Berlin'}, 'remote': True}]}
+    jobs = _with_stub([payload], P.join, 'Acme', slug='acme')
+    assert jobs[0]['location'] == 'Berlin, Remote'
+    assert jobs[0]['url'] == 'https://join.com/companies/acme/jobs/g1'
+
+
+def test_url_based_providers_are_declared():
+    # These have no meaningful slug, so watchlist validation must not demand one.
+    assert P.URL_BASED == {'workday', 'oraclecloud', 'eightfold'}
+    for pid in P.URL_BASED:
+        assert pid in P.PROVIDERS
+
+
+def test_every_provider_has_slug_help():
+    for pid in P.PROVIDERS:
+        assert P.SLUG_HELP.get(pid), pid
+
+
 def test_detect_maps_every_supported_host():
     cases = [
         ('https://boards.greenhouse.io/anthropic', 'greenhouse', 'anthropic'),
@@ -347,6 +455,15 @@ def test_detect_maps_every_supported_host():
         ('https://acme.pinpointhq.com', 'pinpoint', 'acme'),
         ('https://acme.breezy.hr/p/1-eng', 'breezy', 'acme'),
         ('https://ats.rippling.com/acme/jobs', 'rippling', 'acme'),
+        ('https://acme.bamboohr.com/careers', 'bamboohr', 'acme'),
+        ('https://acme.softgarden.io/en/jobs', 'softgarden', 'acme'),
+        ('https://jobs.jobvite.com/acme', 'jobvite', 'acme'),
+        ('https://join.com/companies/acme/jobs/1', 'join', 'acme'),
+        # URL-addressed boards resolve the provider but deliberately no slug.
+        ('https://acme.wd5.myworkdayjobs.com/en-US/Careers', 'workday', ''),
+        ('https://acme.eightfold.ai/careers', 'eightfold', ''),
+        ('https://www.comeet.co/careers-api/2.0/company/uid1/positions?token=tok1',
+         'comeet', 'uid1/tok1'),
         ('https://example.com/careers', None, ''),
     ]
     for url, provider, slug in cases:

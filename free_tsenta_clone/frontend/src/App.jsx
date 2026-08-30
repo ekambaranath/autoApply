@@ -7,11 +7,15 @@ import Applications from './pages/Applications'
 import Pipeline from './pages/Pipeline'
 import Setup from './pages/Setup'
 import Activity from './pages/Activity'
+import Sources from './pages/Sources'
+import Inbox from './pages/Inbox'
 
 const PAGES = [
   { id: 'overview', label: 'Overview', Component: Overview },
   { id: 'jobs', label: 'Jobs', Component: Jobs },
+  { id: 'sources', label: 'Job sources', Component: Sources },
   { id: 'applications', label: 'Applications', Component: Applications },
+  { id: 'inbox', label: 'Inbox', Component: Inbox },
   { id: 'pipeline', label: 'Pipeline health', Component: Pipeline },
   { id: 'activity', label: 'Activity', Component: Activity },
   { id: 'setup', label: 'Setup', Component: Setup },
@@ -55,9 +59,13 @@ export default function App() {
   const followups = useAsync(() => api.followups(), [], { poll: 60000 })
   const overdue = (followups.data || []).filter((f) => f.overdue).length
 
+  const sources = useAsync(() => api.sources(), [], { poll: 120000 })
+  const activeSources = (sources.data || []).filter((s) => s.active).length
+
   const badges = {
     applications: stats.data?.applications || null,
     pipeline: overdue || null,
+    sources: activeSources || null,
   }
 
   const Current = PAGES.find((p) => p.id === page)?.Component || Overview

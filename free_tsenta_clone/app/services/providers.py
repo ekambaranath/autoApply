@@ -226,12 +226,206 @@ def breezy(company, slug='', url=''):
     return out
 
 
+def _post(url, payload, timeout=TIMEOUT, headers=None):
+    h = {'User-Agent': UA, 'Content-Type': 'application/json', 'Accept': 'application/json'}
+    h.update(headers or {})
+    r = httpx.post(url, json=payload, timeout=timeout, follow_redirects=True, headers=h)
+    r.raise_for_status()
+    return r
+
+
+def _host_and_path(url):
+    p = urlparse(url if '//' in (url or '') else f'https://{url}')
+    return (p.hostname or '').lower(), [s for s in (p.path or '').split('/') if s]
+
+
+def workday(company, slug='', url=''):
+    """Workday's public CXS endpoint: a paginated POST per career site.
+
+    Addressed by careers URL rather than a slug, because a Workday board needs
+    three parts — tenant, data-centre instance and site name — that only the
+    URL carries (e.g. acme.wd5.myworkdayjobs.com/en-US/AcmeCareers).
+    """
+    host, segments = _host_and_path(url)
+    if not host.endswith('myworkdayjobs.com') or not segments:
+        raise ProviderError('Workday needs a careers URL like '
+                            'https://acme.wd5.myworkdayjobs.com/en-US/CareerSite')
+    tenant = host.split('.')[0]
+    # The locale segment ("en-US") is optional and never the site name.
+    site = next((s for s in reversed(segments) if not re.fullmatch(r'[a-z]{2}-[A-Z]{2}', s)), segments[-1])
+    api = f'https://{host}/wday/cxs/{tenant}/{site}/jobs'
+    job_base = f'https://{host}/{site}'
+    out = []
+    for page in range(5):  # 100 postings is plenty for a scan; deep pages risk the WAF
+        data = _post(api, {'limit': 20, 'offset': page * 20, 'searchText': '',
+                           'appliedFacets': {}}).json()
+        postings = data.get('jobPostings') or []
+        for j in postings:
+            title, path = (j.get('title') or '').strip(), j.get('externalPath')
+            if not title or not path:
+                continue
+            out.append(_job(title, job_base + path, company,
+                            j.get('locationsText', ''), '', j.get('postedOn')))
+        if len(postings) < 20:
+            break
+    return out
+
+
+def bamboohr(company, slug='', url=''):
+    tenant = _slug(slug) if slug else _host_and_path(url)[0].split('.')[0]
+    origin = f'https://{tenant}.bamboohr.com'
+    data = _get(f'{origin}/careers/list').json()
+    out = []
+    for j in data.get('result', []):
+        title, jid = (j.get('jobOpeningName') or '').strip(), j.get('id')
+        if not title or jid is None:
+            continue
+        loc = j.get('location') or {}
+        where = _join(loc.get('city'), loc.get('state'))
+        if j.get('isRemote'):
+            where = _join(where, 'Remote')
+        out.append(_job(title, f'{origin}/careers/{jid}', company, where, '',
+                        j.get('datePosted')))
+    return out
+
+
+def oraclecloud(company, slug='', url=''):
+    """Oracle Cloud HCM recruiting sites."""
+    host, segments = _host_and_path(url)
+    if not host:
+        raise ProviderError('Oracle Cloud needs the careers URL')
+    # The site number is the segment directly after "sites" in the career URL.
+    site = segments[segments.index('sites') + 1] if 'sites' in segments[:-1] else 'CX'
+    api = (f'https://{host}/hcmRestApi/resources/latest/recruitingCEJobRequisitions'
+           f'?onlyData=true&expand=requisitionList&finder=findReqs;siteNumber={site},'
+           'limit=100,sortBy=POSTING_DATES_DESC')
+    data = _get(api).json()
+    out = []
+    for item in data.get('items', []):
+        for j in item.get('requisitionList', []):
+            title, jid = (j.get('Title') or '').strip(), j.get('Id')
+            if not title or not jid:
+                continue
+            out.append(_job(title,
+                            f'https://{host}/hcmUI/CandidateExperience/en/sites/{site}/job/{jid}',
+                            company, j.get('PrimaryLocation', ''), '', j.get('PostedDate')))
+    return out
+
+
+def eightfold(company, slug='', url=''):
+    """Eightfold-hosted career sites."""
+    host = _host_and_path(url)[0] or f'{_slug(slug)}.eightfold.ai'
+    data = _get(f'https://{host}/api/apply/v2/jobs?domain={host}&start=0&num=100'
+                '&sort_by=timestamp').json()
+    out = []
+    for j in data.get('positions', []):
+        title = (j.get('name') or '').strip()
+        link = j.get('canonicalPositionUrl') or j.get('positionUrl')
+        if not title or not link:
+            continue
+        out.append(_job(title, link, company or j.get('company', ''),
+                        j.get('location', ''), _text(j.get('job_description', '')),
+                        j.get('t_create')))
+    return out
+
+
+def comeet(company, slug='', url=''):
+    """Comeet needs a company UID and a public token, both in the board URL."""
+    uid, token = '', ''
+    if slug and '/' in slug:
+        uid, token = slug.split('/', 1)
+    elif slug:
+        uid = slug
+    if url and not token:
+        m = re.search(r'company/([^/?]+).*?token=([^&]+)', url)
+        if m:
+            uid, token = m.group(1), m.group(2)
+    if not uid or not token:
+        raise ProviderError('Comeet needs "<company-uid>/<token>" as the slug')
+    data = _get(f'https://www.comeet.co/careers-api/2.0/company/{uid}/positions?token={token}').json()
+    return [_job(j.get('name'), j.get('url_active_page') or j.get('url_comeet_hosted_page'),
+                 company, _join((j.get('location') or {}).get('city'),
+                                (j.get('location') or {}).get('country')),
+                 _text(str(j.get('details') or '')), j.get('time_updated'))
+            for j in (data if isinstance(data, list) else []) if j.get('name')]
+
+
+def getro(company, slug='', url=''):
+    """Getro / VC talent-network collections."""
+    cid = _slug(slug)
+    data = _post(f'https://api.getro.com/api/v2/collections/{cid}/search/jobs',
+                 {'hitsPerPage': 100, 'page': 0}).json()
+    out = []
+    for j in (data.get('results') or {}).get('jobs', data.get('jobs', [])):
+        title, link = (j.get('title') or '').strip(), j.get('url')
+        if not title or not link:
+            continue
+        org = j.get('organization') or {}
+        out.append(_job(title, link, org.get('name') or company,
+                        ', '.join(j.get('locations') or []) or j.get('location', ''),
+                        _text(j.get('description', '')), j.get('created_at')))
+    return out
+
+
+def softgarden(company, slug='', url=''):
+    tenant = _slug(slug) if slug else _host_and_path(url)[0].split('.')[0]
+    data = _get(f'https://{tenant}.softgarden.io/api/rest/frontend/v3/jobs?limit=100').json()
+    out = []
+    for j in data.get('jobs', data if isinstance(data, list) else []):
+        title = (j.get('jobTitle') or j.get('title') or '').strip()
+        link = j.get('jobDetailUrl') or j.get('url')
+        if not title or not link:
+            continue
+        out.append(_job(title, link, company, (j.get('location') or {}).get('city', '')
+                        if isinstance(j.get('location'), dict) else j.get('location', ''),
+                        _text(j.get('jobDescription', '')), j.get('onlineDate')))
+    return out
+
+
+def jobvite(company, slug='', url=''):
+    s = _slug(slug)
+    data = _get(f'https://jobs.jobvite.com/api/company/{s}/jobs').json()
+    out = []
+    for j in data.get('jobs', data if isinstance(data, list) else []):
+        title = (j.get('title') or '').strip()
+        jid = j.get('eId') or j.get('id')
+        if not title or not jid:
+            continue
+        out.append(_job(title, j.get('applyUrl') or f'https://jobs.jobvite.com/{s}/job/{jid}',
+                        company, j.get('location', ''), _text(j.get('description', '')),
+                        j.get('postedDate')))
+    return out
+
+
+def join(company, slug='', url=''):
+    s = _slug(slug)
+    data = _get(f'https://join.com/api/public/companies/{s}/jobs').json()
+    out = []
+    for j in data.get('jobs', data if isinstance(data, list) else []):
+        title = (j.get('title') or '').strip()
+        jid = j.get('idParam') or j.get('id')
+        if not title or not jid:
+            continue
+        out.append(_job(title, f'https://join.com/companies/{s}/jobs/{jid}', company,
+                        _join((j.get('location') or {}).get('city') if isinstance(j.get('location'), dict)
+                              else j.get('location'), 'Remote' if j.get('remote') else ''),
+                        _text(j.get('description', '')), j.get('publishedAt')))
+    return out
+
+
 PROVIDERS = {
     'greenhouse': greenhouse, 'lever': lever, 'ashby': ashby,
     'smartrecruiters': smartrecruiters, 'workable': workable, 'recruitee': recruitee,
     'personio': personio, 'teamtailor': teamtailor, 'rippling': rippling,
     'pinpoint': pinpoint, 'breezy': breezy,
+    'workday': workday, 'bamboohr': bamboohr, 'oraclecloud': oraclecloud,
+    'eightfold': eightfold, 'comeet': comeet, 'getro': getro,
+    'softgarden': softgarden, 'jobvite': jobvite, 'join': join,
 }
+
+#: Boards addressed by their careers URL rather than a short slug, because the
+#: URL carries parts (tenant, instance, site) a slug cannot express.
+URL_BASED = {'workday', 'oraclecloud', 'eightfold'}
 
 #: Boards addressed by a slug on a shared host, vs. a slug in their own subdomain.
 SLUG_HELP = {
@@ -246,6 +440,15 @@ SLUG_HELP = {
     'rippling': 'board slug from ats.rippling.com/<slug>',
     'pinpoint': 'subdomain from <slug>.pinpointhq.com',
     'breezy': 'subdomain from <slug>.breezy.hr',
+    'workday': 'paste the full careers URL (tenant.wdN.myworkdayjobs.com/...)',
+    'bamboohr': 'subdomain from <slug>.bamboohr.com',
+    'oraclecloud': 'paste the full Oracle Cloud careers URL',
+    'eightfold': 'paste the full Eightfold careers URL',
+    'comeet': '"<company-uid>/<token>", both visible in the board URL',
+    'getro': 'collection id from the Getro talent network',
+    'softgarden': 'subdomain from <slug>.softgarden.io',
+    'jobvite': 'company slug from jobs.jobvite.com/<slug>',
+    'join': 'company slug from join.com/companies/<slug>',
 }
 
 # host pattern -> (provider id, how to pull the slug out of the URL)
@@ -261,6 +464,15 @@ _HOST_RULES = [
     (r'(.+)\.teamtailor\.com', 'teamtailor', 'subdomain'),
     (r'(.+)\.pinpointhq\.com', 'pinpoint', 'subdomain'),
     (r'(.+)\.breezy\.hr', 'breezy', 'subdomain'),
+    (r'(.+)\.bamboohr\.com', 'bamboohr', 'subdomain'),
+    (r'(.+)\.softgarden\.io', 'softgarden', 'subdomain'),
+    (r'jobs\.jobvite\.com', 'jobvite', 'path'),
+    (r'join\.com', 'join', 'path-after-companies'),
+    (r'.+\.wd\d+\.myworkdayjobs\.com', 'workday', 'url'),
+    (r'.+\.eightfold\.ai|.+\.myeightfold\.ai', 'eightfold', 'url'),
+    (r'.+\.oraclecloud\.com|.+\.fa\.[a-z0-9]+\.oraclecloud\.com', 'oraclecloud', 'url'),
+    # detect() strips a leading "www.", so the bare host must be listed too.
+    (r'comeet\.co|.+\.comeet\.co', 'comeet', 'comeet'),
 ]
 
 
@@ -282,11 +494,23 @@ def detect(url):
         m = re.fullmatch(pattern, host)
         if not m:
             continue
-        slug = m.group(1) if where == 'subdomain' else (segments[0] if segments else '')
+        if where == 'url':
+            # The whole URL is the address; there is no meaningful short slug.
+            return provider, ''
+        if where == 'comeet':
+            found = re.search(r'company/([^/?]+).*?token=([^&]+)', url)
+            return provider, f'{found.group(1)}/{found.group(2)}' if found else ''
+        if where == 'path-after-companies':
+            idx = segments.index('companies') + 1 if 'companies' in segments else 0
+            slug = segments[idx] if len(segments) > idx else ''
+        elif where == 'subdomain':
+            slug = m.group(1)
+        else:
+            slug = segments[0] if segments else ''
         # Greenhouse embed URLs carry the board under ?for=<slug>.
         if provider == 'greenhouse' and slug == 'embed':
-            slug = re.search(r'for=([A-Za-z0-9_-]+)', parsed.query or '')
-            slug = slug.group(1) if slug else ''
+            found = re.search(r'for=([A-Za-z0-9_-]+)', parsed.query or '')
+            slug = found.group(1) if found else ''
         if slug and SLUG_RE.match(slug):
             return provider, slug
         return provider, ''
