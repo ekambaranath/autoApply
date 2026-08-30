@@ -20,8 +20,31 @@ def init_db():
     CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY,application_id TEXT,event_type TEXT,payload TEXT,created_at TEXT);
     CREATE TABLE IF NOT EXISTS watchlist(id INTEGER PRIMARY KEY,company TEXT,platform TEXT,slug TEXT,url TEXT,active INTEGER DEFAULT 1,created_at TEXT);
     CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT);
+    CREATE TABLE IF NOT EXISTS scan_runs(id TEXT PRIMARY KEY,trigger TEXT,status TEXT,jobs_found INTEGER DEFAULT 0,companies INTEGER DEFAULT 0,detail TEXT,error TEXT,started_at TEXT,finished_at TEXT);
+    CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
+    CREATE INDEX IF NOT EXISTS idx_jobs_score ON jobs(match_score);
     '''); c.commit(); c.close()
+    migrate()
+
+def migrate():
+    """Add columns introduced after the first release without dropping existing data."""
+    c=db()
+    for table,col,ddl in [('applications','screenshot_file','TEXT'),('applications','notes','TEXT'),
+                          ('applications','followups_sent','INTEGER DEFAULT 0'),
+                          ('applications','followed_up_at','TEXT'),
+                          ('jobs','dismissed','INTEGER DEFAULT 0'),
+                          ('preferences','excluded_titles','TEXT')]:
+        cols={r['name'] for r in c.execute(f'PRAGMA table_info({table})')}
+        if col not in cols: c.execute(f'ALTER TABLE {table} ADD COLUMN {col} {ddl}')
+    c.commit(); c.close()
 init_db()
+
+def get_setting(key,default=None):
+    c=db(); r=c.execute('SELECT value FROM settings WHERE key=?',(key,)).fetchone(); c.close()
+    return r['value'] if r else default
+
+def set_setting(key,value):
+    c=db(); c.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(key,str(value))); c.commit(); c.close()
 
 def get_profile():
     c=db(); r=c.execute('SELECT * FROM profile ORDER BY id DESC LIMIT 1').fetchone(); c.close(); return dict(r) if r else None

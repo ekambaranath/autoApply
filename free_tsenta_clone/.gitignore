@@ -4,3 +4,7 @@ __pycache__/
 .env
 storage/*
 data/*.db
+node_modules/
+frontend/node_modules/
+frontend/dist/
+.pytest_cache/
