@@ -3,6 +3,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 import httpx
 
+# Load .env before anything reads os.getenv. The docs and .env.example have
+# always told people to configure the agent this way; without this nothing
+# actually read the file, so a correct .env looked exactly like no config.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parents[2] / '.env')
+except ImportError:
+    pass
+
 ROOT=Path(__file__).resolve().parents[2]; DATA=ROOT/'data'; STORAGE=ROOT/'storage'; DATA.mkdir(exist_ok=True); STORAGE.mkdir(exist_ok=True)
 DB=DATA/'career_agent.db'
 
