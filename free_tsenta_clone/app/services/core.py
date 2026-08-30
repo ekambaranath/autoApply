@@ -72,14 +72,88 @@ def score_job(desc,resume,prefs=None):
 def audit(app_id,event,payload):
     c=db(); c.execute('INSERT INTO events VALUES(?,?,?,?,?)',(uuid.uuid4().hex,app_id,event,json.dumps(payload,ensure_ascii=False),now())); c.commit(); c.close()
 
+#: Set by the last llm() call, so a misconfigured provider reports the real
+#: reason instead of looking identical to a model that simply answered badly.
+LLM_LAST_ERROR = None
+
+#: Free and low-priority tiers are served slowly: a full tailored resume can be
+#: several thousand tokens, and at the throughput a free tier gives you that
+#: takes minutes. The old 180s default aborted mid-generation and surfaced as
+#: "the model returned nothing", which is indistinguishable from a bad prompt.
+DEFAULT_LLM_TIMEOUT = 600
+
+
+def llm_timeout():
+    try:
+        return max(30, int(os.getenv('LLM_TIMEOUT', DEFAULT_LLM_TIMEOUT)))
+    except ValueError:
+        return DEFAULT_LLM_TIMEOUT
+
+
+def llm_config():
+    """What the agent will call, and why the last call failed if it did."""
+    provider = os.getenv('LLM_PROVIDER', 'ollama').lower()
+    return {'provider': provider,
+            'model': os.getenv('OLLAMA_MODEL', 'llama3.1:8b') if provider == 'ollama'
+                     else os.getenv('LLM_MODEL', 'gpt-4o-mini'),
+            'base_url': os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434') if provider == 'ollama'
+                        else os.getenv('LLM_BASE_URL', 'https://api.openai.com/v1'),
+            'has_key': bool(os.getenv('LLM_API_KEY')) if provider != 'ollama' else True,
+            'timeout': llm_timeout(),
+            'last_error': LLM_LAST_ERROR}
+
+
 def llm(prompt):
-    provider=os.getenv('LLM_PROVIDER','ollama').lower()
-    if provider=='ollama':
-        try:
-            r=httpx.post(os.getenv('OLLAMA_BASE_URL','http://localhost:11434')+'/api/generate',json={'model':os.getenv('OLLAMA_MODEL','llama3.1:8b'),'prompt':prompt,'stream':False},timeout=180); r.raise_for_status(); return r.json().get('response','')
-        except Exception: return ''
-    if provider=='openai_compatible':
-        try:
-            r=httpx.post(os.getenv('LLM_BASE_URL','https://api.openai.com/v1')+'/chat/completions',headers={'Authorization':'Bearer '+os.getenv('LLM_API_KEY','')},json={'model':os.getenv('LLM_MODEL','gpt-4o-mini'),'messages':[{'role':'user','content':prompt}],'temperature':.15},timeout=180); r.raise_for_status(); return r.json()['choices'][0]['message']['content']
-        except Exception: return ''
+    """Call the configured model. Returns '' on failure, with the reason in
+    LLM_LAST_ERROR so callers and the UI can tell why rather than guessing."""
+    global LLM_LAST_ERROR
+    provider = os.getenv('LLM_PROVIDER', 'ollama').lower()
+    timeout = llm_timeout()
+    try:
+        if provider == 'ollama':
+            r = httpx.post(os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434') + '/api/generate',
+                           json={'model': os.getenv('OLLAMA_MODEL', 'llama3.1:8b'),
+                                 'prompt': prompt, 'stream': False}, timeout=timeout)
+            r.raise_for_status()
+            LLM_LAST_ERROR = None
+            return r.json().get('response', '')
+
+        if provider == 'openai_compatible':
+            key = os.getenv('LLM_API_KEY', '')
+            if not key:
+                LLM_LAST_ERROR = 'LLM_API_KEY is not set'
+                return ''
+            headers = {'Authorization': 'Bearer ' + key}
+            base = os.getenv('LLM_BASE_URL', 'https://api.openai.com/v1')
+            if 'openrouter' in base:
+                # OpenRouter asks callers to identify themselves; without these
+                # a request still works but is deprioritised on free tiers.
+                headers.update({'HTTP-Referer': 'http://localhost:8000',
+                                'X-Title': 'Open Career Agent'})
+            r = httpx.post(base + '/chat/completions', headers=headers,
+                           json={'model': os.getenv('LLM_MODEL', 'gpt-4o-mini'),
+                                 'messages': [{'role': 'user', 'content': prompt}],
+                                 'temperature': .15}, timeout=timeout)
+            r.raise_for_status()
+            data = r.json()
+            if 'choices' not in data:
+                # OpenRouter reports a bad slug or an exhausted quota as a 200
+                # carrying an error object, so this is not an exceptional path.
+                LLM_LAST_ERROR = str(data.get('error') or data)[:400]
+                return ''
+            LLM_LAST_ERROR = None
+            return data['choices'][0]['message']['content']
+
+        LLM_LAST_ERROR = f'Unknown LLM_PROVIDER: {provider}'
+        return ''
+    except httpx.TimeoutException:
+        LLM_LAST_ERROR = (f'Timed out after {timeout}s. Free tiers are slow — '
+                          'raise LLM_TIMEOUT or pick a faster model.')
+    except httpx.HTTPStatusError as e:
+        body = (e.response.text or '')[:300]
+        LLM_LAST_ERROR = f'HTTP {e.response.status_code}: {body}'
+    except httpx.ConnectError as e:
+        LLM_LAST_ERROR = f'Could not reach the model: {e}'
+    except Exception as e:
+        LLM_LAST_ERROR = f'{type(e).__name__}: {e}'
     return ''

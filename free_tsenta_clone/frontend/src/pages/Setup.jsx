@@ -263,6 +263,67 @@ function Watchlist() {
   )
 }
 
+
+function ModelPanel() {
+  const info = useAsync(() => api.llm(), [])
+  const [result, setResult] = useState(null)
+  const cfg = info.data || {}
+  const isOllama = cfg.provider === 'ollama'
+
+  return (
+    <div className="card">
+      <div className="card-head">
+        <div>
+          <h2>AI model</h2>
+          <p className="sub">Used to tailor your resume, write cover letters and answer screening questions.</p>
+        </div>
+        <Action className="btn primary" onClick={async () => setResult(await api.testLlm())}>
+          Test the model
+        </Action>
+      </div>
+
+      <div className="grid k2">
+        <Field label="Provider"><input value={cfg.provider || ''} readOnly /></Field>
+        <Field label="Model"><input value={cfg.model || ''} readOnly /></Field>
+        <Field label="Endpoint"><input value={cfg.base_url || ''} readOnly /></Field>
+        <Field label="Timeout"><input value={`${cfg.timeout || 0}s`} readOnly /></Field>
+      </div>
+
+      {!isOllama && !cfg.has_key && (
+        <Banner kind="error">LLM_API_KEY is not set - every request will fail.</Banner>
+      )}
+
+      {result && (result.ok ? (
+        <Banner kind="good">
+          Working - replied in {result.seconds}s
+          {result.json_clean
+            ? ' and returned clean JSON.'
+            : '. Note: the reply was not clean JSON, so tailoring may fall back.'}
+        </Banner>
+      ) : (
+        <Banner kind="error">
+          <b>Failed after {result.seconds}s.</b> {result.error}
+        </Banner>
+      ))}
+
+      <h3>Switching to a hosted model</h3>
+      <p className="small muted">
+        Set these in your environment and restart. Nothing is stored in the database.
+      </p>
+      <pre className="mono diff-box" style={{ padding: 12 }}>{`LLM_PROVIDER=openai_compatible
+LLM_BASE_URL=https://openrouter.ai/api/v1
+LLM_API_KEY=sk-or-v1-...
+LLM_MODEL=nvidia/nemotron-3-super-120b-a12b:free
+LLM_TIMEOUT=600`}</pre>
+      <p className="small muted">
+        Free tiers are served at low priority, so a full tailored resume can take minutes -
+        that is why the timeout defaults to 600s. Free providers may also train on what you
+        send, and every request includes your name, email and phone.
+      </p>
+    </div>
+  )
+}
+
 export default function Setup() {
   const [tab, setTab] = useState('profile')
   return (
@@ -277,10 +338,12 @@ export default function Setup() {
         { id: 'profile', label: 'Profile' },
         { id: 'prefs', label: 'Preferences' },
         { id: 'watch', label: 'Watchlist' },
+        { id: 'model', label: 'AI model' },
       ]} />
       {tab === 'profile' && <ProfileForm />}
       {tab === 'prefs' && <PreferencesForm />}
       {tab === 'watch' && <Watchlist />}
+      {tab === 'model' && <ModelPanel />}
     </>
   )
 }

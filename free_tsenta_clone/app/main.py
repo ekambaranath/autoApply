@@ -833,6 +833,33 @@ def mailbox_classify(subject: str = Form(''), body: str = Form('')):
     return {'classified': mailbox.classify(subject, body) or 'UNCLEAR'}
 
 
+@app.get('/api/llm')
+def llm_status():
+    """What model the agent will call, and why the last call failed if it did."""
+    return llm_config()
+
+
+@app.post('/api/llm/test')
+def llm_test():
+    """Send a tiny prompt and report exactly what came back.
+
+    Worth having because every failure mode — wrong slug, missing key, an
+    exhausted free quota, a timeout mid-generation — otherwise looks identical
+    from the dashboard: the application just says the resume was preserved.
+    """
+    import time
+    started = time.time()
+    reply = llm('Reply with exactly this JSON and nothing else: {"ok": true}')
+    elapsed = round(time.time() - started, 1)
+    cfg = llm_config()
+    if not reply:
+        return {'ok': False, 'seconds': elapsed, 'error': cfg['last_error'] or 'Empty response',
+                **{k: cfg[k] for k in ('provider', 'model', 'base_url', 'timeout')}}
+    return {'ok': True, 'seconds': elapsed, 'reply': reply[:400],
+            'json_clean': bool(re.search(r'\{.*"ok".*\}', reply, re.S)),
+            **{k: cfg[k] for k in ('provider', 'model', 'base_url', 'timeout')}}
+
+
 @app.get('/api/states')
 def states_list():
     """The canonical status roster the UI renders and the API accepts."""
