@@ -1,0 +1,20 @@
+{
+  "name": "Open Career Agent",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": { "version": "20" }
+  },
+  "postCreateCommand": "bash .devcontainer/setup.sh",
+  "forwardPorts": [8000],
+  "portsAttributes": {
+    "8000": { "label": "Career Agent", "onAutoForward": "openBrowser" }
+  },
+  "secrets": {
+    "LLM_API_KEY": { "description": "OpenRouter (or other OpenAI-compatible) API key." },
+    "LLM_MODEL": { "description": "Model id, e.g. nvidia/nemotron-3-super-120b-a12b:free" },
+    "MAIL_PASSWORD": { "description": "IMAP app password, if you want reply tracking." }
+  },
+  "customizations": {
+    "vscode": { "extensions": ["ms-python.python", "dbaeumer.vscode-eslint"] }
+  }
+}

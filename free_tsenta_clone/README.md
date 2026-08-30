@@ -33,6 +33,29 @@ Open `http://127.0.0.1:8000`. The built dashboard is served by FastAPI on the sa
 cd frontend && npm run dev     # http://localhost:5173, proxies /api to :8000
 ```
 
+## Running in GitHub Codespaces
+
+A devcontainer is included, so **Code → Codespaces → Create codespace on main** installs everything and builds the dashboard automatically. When it finishes:
+
+```bash
+cd free_tsenta_clone
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+`--host 0.0.0.0` is required. Codespaces only forwards ports bound to all interfaces — the default `127.0.0.1` is reachable inside the container but produces a dead forwarded URL.
+
+Port 8000 forwards automatically and opens in a browser tab.
+
+**Configure it** with a `.env` in `free_tsenta_clone/` (copy `.env.example`; it is gitignored), or for anything secret use **Codespaces secrets** — repo Settings → Secrets and variables → Codespaces — which arrive as environment variables and never touch the repo.
+
+Three things differ from running locally:
+
+- **Use a hosted model, not Ollama.** A 2-core Codespace does not have the RAM to run an 8B model; see *The AI model* below.
+- **Keep the forwarded port private.** It defaults to private, which is right — the dashboard exposes your resume, contact details and application history with no login. Do not switch it to public.
+- **ATS form-filling may be blocked.** Playwright runs from a datacenter IP, which some ATS anti-bot systems reject. Discovery, matching, tailoring and tracking are unaffected; only the browser agent is. Run that part locally if it matters.
+
+If you would rather not use the devcontainer, the steps in *Install* work as-is once you add `--host 0.0.0.0`.
+
 ## The AI model
 
 Used to tailor your resume, write cover letters and answer screening questions. **Setup → AI model** shows what is configured and has a **Test the model** button that reports the real error — wrong slug, missing key, exhausted quota, timeout — instead of silently falling back.
