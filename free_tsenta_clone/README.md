@@ -33,13 +33,50 @@ Open `http://127.0.0.1:8000`. The built dashboard is served by FastAPI on the sa
 cd frontend && npm run dev     # http://localhost:5173, proxies /api to :8000
 ```
 
-## Free local AI
+## The AI model
+
+Used to tailor your resume, write cover letters and answer screening questions. **Setup → AI model** shows what is configured and has a **Test the model** button that reports the real error — wrong slug, missing key, exhausted quota, timeout — instead of silently falling back.
+
+### Option 1 — local, private, free
 
 ```bash
 ollama pull llama3.1:8b
 ```
 
-The app defaults to Ollama. Set `LLM_PROVIDER=openai_compatible` plus `LLM_API_KEY` / `LLM_MODEL` to use a hosted model instead. With no LLM reachable, preparation falls back to your original resume and a plain cover letter rather than inventing content.
+The default. Nothing leaves your machine.
+
+### Option 2 — hosted via OpenRouter
+
+```bash
+LLM_PROVIDER=openai_compatible
+LLM_BASE_URL=https://openrouter.ai/api/v1
+LLM_API_KEY=sk-or-v1-...
+LLM_MODEL=nvidia/nemotron-3-super-120b-a12b:free
+LLM_TIMEOUT=600
+```
+
+Any OpenAI-compatible endpoint works; OpenRouter just happens to have a free tier.
+
+**Choosing a model.** This prompt is harder than it looks: it holds ~30k tokens of resume + job description, rewrites the resume *without inventing anything*, and returns it all as valid JSON. So you need:
+
+| Requirement | Why |
+| --- | --- |
+| Context ≥ 32k | `prepare` sends up to 100k characters |
+| Output ≥ 8k tokens | A truncated resume is invalid JSON, and falls back silently |
+| Good instruction-following | Weak models invent a metric or title to make the resume "better" — which defeats the anti-fabrication guarantee |
+| Throughput ≥ ~20 t/s | Below that, a 3k-token response exceeds even the 600s timeout |
+
+That last row is the trap: the cheapest models are often the slowest, and a 7 t/s model needs ~7 minutes for one resume.
+
+The free roster churns — it dropped from 15 to 14 models in a single week — so check what exists before committing:
+
+```bash
+curl -s https://openrouter.ai/api/v1/models \
+  | jq -r '.data[] | select(.pricing.prompt=="0")
+           | "\(.id)\t\(.context_length)"'
+```
+
+Free tiers are rate-limited (~20 req/min, ~200 req/day), served at low priority, and **may train on what you send** — and every request carries your name, email, phone and location. If that matters, a cheap paid model runs about $0.004 per application.
 
 ## The dashboard
 
@@ -80,6 +117,19 @@ Add a company on **Setup → Watchlist** by pasting its careers URL — the boar
 
 Workday, Oracle Cloud and Eightfold are addressed by their full careers URL rather than a slug — the URL carries tenant, instance and site, which a slug cannot express. Anything unrecognised falls back to a best-effort career-page crawler.
 
+### Title filtering
+
+Preferences take keep and reject keyword lists. A plain keyword is a substring; the prefixes narrow it:
+
+| Entry | Matches |
+| --- | --- |
+| `agent` | Agentforce, Agentic **and** Reagents |
+| `word:agent` | only the exact word — rejects Agentforce |
+| `stem:agent` | words starting with it — keeps Agentforce, drops Reagents |
+| `director + engineering` | titles containing **both** terms, in any order |
+
+Two-to-three letter acronyms anchor automatically, so `coo` never matches "Coordinator". Use **Test the title filter** to check a filter before it silently drops a whole scan.
+
 ## Closing the loop — reading employer replies
 
 Statuses otherwise only move when you remember to log them, which is the step that gets skipped. Point the agent at your mailbox and it reads replies, classifies them, and advances the matching application:
@@ -102,19 +152,6 @@ Credentials are read from the environment and never written to the database. Gma
 - Bulk senders (no-reply, job alerts, newsletters) are skipped entirely.
 - Company matching is whole-word, so a short name like "Ai" cannot match inside "mailchimp".
 
-### Title filtering
-
-Preferences take keep and reject keyword lists. A plain keyword is a substring; the prefixes narrow it:
-
-| Entry | Matches |
-| --- | --- |
-| `agent` | Agentforce, Agentic **and** Reagents |
-| `word:agent` | only the exact word — rejects Agentforce |
-| `stem:agent` | words starting with it — keeps Agentforce, drops Reagents |
-| `director + engineering` | titles containing **both** terms, in any order |
-
-Two-to-three letter acronyms anchor automatically, so `coo` never matches "Coordinator". Use **Test the title filter** to check a filter before it silently drops a whole scan.
-
 ## Pipeline health
 
 - **Follow-up cadence** — a first nudge 7 days after applying, then one more; replies get a next-day answer, interviews a thank-you. Configurable in `insights.DEFAULT_CADENCE`.
@@ -133,10 +170,10 @@ Unknown personal facts are marked `NEEDS_USER_INPUT` rather than guessed. Review
 ```bash
 python -m pytest tests/ -q
 # or individually:
-python tests/test_ported_logic.py tests/test_aggregators.py tests/test_mailbox.py
+python tests/test_ported_logic.py tests/test_aggregators.py tests/test_mailbox.py tests/test_llm.py
 ```
 
-110 tests cover role matching, title filtering, state folding, repost clustering, legitimacy signals, follow-up cadence, channel rates, every ATS and aggregator parser, and the full IMAP sync path. All of them stub the network with captured payloads, so the suite runs offline.
+122 tests cover role matching, title filtering, state folding, repost clustering, legitimacy signals, follow-up cadence, channel rates, every ATS and aggregator parser, the full IMAP sync path, and every LLM failure mode. All of them stub the network with captured payloads, so the suite runs offline.
 
 > The adapters are verified against captured response shapes, not live endpoints — the sandbox this was built in blocks those hosts. Use **Test** on a source, or run a watchlist scan, to confirm one against the real API.
 

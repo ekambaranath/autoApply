@@ -87,6 +87,10 @@ export const api = {
   mailbox: () => request('/api/mailbox'),
   mailSync: (dryRun = false) => post(`/api/mailbox/sync?dry_run=${dryRun}`),
 
+  // Which model the agent calls, and a one-shot check that it actually works.
+  llm: () => request('/api/llm'),
+  testLlm: () => post('/api/llm/test'),
+
   providers: () => request('/api/providers'),
   detectProvider: (url) =>
     request('/api/providers/detect', {
